@@ -14,8 +14,9 @@ The library exports the following methods under the `WebS` namespace:
 | `WebS.Disconnect()` | Disconnects from the hub safely. |
 | `WebS.SendMessage(method, argsTable)` | Invokes a method on the SignalR hub. `method` is the hub function name (string), `argsTable` is a table of arguments (strings, numbers, booleans). |
 | `WebS.GetMessage()` | Retrieves the next message from the incoming queue. Returns an empty string if the queue is empty. |
+| `WebS.GetConnectionId()` | **New!** Returns the unique Connection ID string assigned by the SignalR hub. Returns an empty string if not connected. |
 | `WebS.ProcessEvents()` | **Must be called in a loop.** Processes internal events (`OnConnect`, `OnError`, `OnDisconnect`) and triggers Lua callbacks. |
-| `WebS.GetStatus()` | Returns the current connection status: `"disconnected"`, `"connecting"`, `"connected"`, `"error"`, or `"stopping"`. |
+| `WebS.GetStatus()` | Returns the current connection status: `"disconnected"`, `"connecting"`, `"connected"`, `"disconnecting"`. |
 | `WebS.GetQueueSize()` | Returns the number of unread messages in the queue. |
 
 ### Lua Callbacks
@@ -83,7 +84,7 @@ end
 1.  [x] **Async Architecture:** Move connection logic to a background thread to prevent game freezes.
 2.  [x] **Event System:** Implement `OnConnect`, `OnError` callbacks with arguments.
 3.  [x] **Crash Fixes:** Resolve Access Violations by removing unsafe `std::rethrow_exception` usage.
-4.  [ ] **General Logging:** Implement a robust logging system with log levels (Info/Debug/Error).
+4.  [x] **General Logging:** Implement a robust logging system with log levels (Info/Debug/Error) and clean formatting.
 5.  [ ] **OOP Refactoring:** encapsulate global state into a proper Singleton class or Object instances.
 6.  [ ] **Reconnect Logic:** Add automatic reconnection strategies with exponential backoff.
 7.  [ ] **JSON Support:** Native JSON parsing support for complex objects in `SendMessage`.
