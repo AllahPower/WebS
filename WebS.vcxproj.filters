@@ -21,6 +21,12 @@
     <ClInclude Include="pch.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\..\..\..\temp\lua\5.1\include\lua.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\..\temp\lua\5.1\include\lauxlib.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -31,6 +37,6 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <Library Include="C:\lua\bin\lua51.lib" />
+    <Library Include="..\..\lua\Release\lua51.lib" />
   </ItemGroup>
 </Project>

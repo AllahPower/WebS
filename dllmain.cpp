@@ -1,13 +1,4 @@
 ﻿#include "pch.h"
-#include <iostream>
-#include <future>
-#include "signalrclient/hub_connection.h"
-#include "signalrclient/hub_connection_builder.h"
-#include "signalrclient/signalr_client_config.h"
-#include "signalrclient/web_exception.h"
-#include "signalrclient/signalr_value.h"
-#include <queue>
-#include <windows.h>
 
 #define LUA_LIB
 #define LUA_BUILD_AS_DLL
@@ -19,131 +10,232 @@ extern "C" {
 
 class logger : public signalr::log_writer
 {
+public:
     virtual void write(const std::string& entry) override
     {
-        std::ofstream myfile;
-        myfile.open("websocketLogging.txt", std::fstream::app);
-        myfile << entry;
-        myfile.close();
+        std::ofstream logfile("websocketLogging.txt", std::ios::app);
+        if (logfile.is_open()) {
+            auto now = std::chrono::system_clock::now();
+            auto time = std::chrono::system_clock::to_time_t(now);
+            struct tm timeinfo;
+            localtime_s(&timeinfo, &time);
+
+            char buffer[100];
+            strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+            logfile << "[" << buffer << "] " << entry << std::endl;
+        }
     }
+
+    void logInfo(const std::string& msg) { write("[INFO] " + msg); }
+    void logError(const std::string& msg) { write("[ERROR] " + msg); }
+    void logSuccess(const std::string& msg) { write("[SUCCESS] " + msg); }
 };
 
-std::queue<std::string> queue;
-signalr::hub_connection connection = signalr::hub_connection_builder::create("http://localhost:5000/hub").build();
-bool isConnectionSetup = false;
+struct LuaEvent {
+    std::string name;
+    std::string arg;
+};
+
+enum class ConnectionStatus {
+    DISCONNECTED = 0,
+    CONNECTING = 1,
+    CONNECTED = 2,
+    _ERROR = 3
+};
+
+std::queue<std::string> messageQueue;
+std::mutex messageQueueMutex;
+
+std::queue<LuaEvent> eventQueue;
+std::mutex eventQueueMutex;
+
+std::shared_ptr<signalr::hub_connection> connection = nullptr;
+ConnectionStatus connectionStatus = ConnectionStatus::DISCONNECTED;
 std::string url;
 std::string token;
+lua_State* g_LuaState = nullptr;
+std::thread* connectionThread = nullptr;
+std::atomic<bool> stopThread{ false };
 
-BOOL APIENTRY DllMain(HANDLE hModule,
-    DWORD  ul_reason_for_call,
-    LPVOID lpReserved
-)
-{
-    return TRUE;
+std::mutex connectionMutex;
+
+void SetStatus(ConnectionStatus status) {
+    connectionStatus = status;
 }
 
+const char* GetStatusString(ConnectionStatus status) {
+    switch (status) {
+    case ConnectionStatus::DISCONNECTED:
+        return "disconnected";
+    case ConnectionStatus::CONNECTING:
+        return "connecting";
+    case ConnectionStatus::CONNECTED:
+        return "connected";
+    case ConnectionStatus::_ERROR:
+        return "error";
+    default:
+        return "disconnected";
+    }
+}
 
-static void handleDisconnected(std::exception_ptr ex)
-{
-    if (isConnectionSetup == false) {
+bool IsConnected() {
+    return connectionStatus == ConnectionStatus::CONNECTED;
+}
+
+void PushEvent(const std::string& eventName, const std::string& arg = "") {
+    std::lock_guard<std::mutex> lock(eventQueueMutex);
+    eventQueue.push({ eventName, arg });
+}
+
+void CallLuaEvent(const LuaEvent& event) {
+    if (!g_LuaState) return;
+
+    lua_getglobal(g_LuaState, "WebS");
+    if (!lua_istable(g_LuaState, -1)) {
+        lua_pop(g_LuaState, 1);
         return;
     }
 
-    std::promise<void> start_task;
+    lua_getfield(g_LuaState, -1, event.name.c_str());
+    if (!lua_isfunction(g_LuaState, -1)) {
+        lua_pop(g_LuaState, 2);
+        return;
+    }
 
-    connection.start([&start_task](std::exception_ptr exception) {
-        start_task.set_value();
-        });
+    int argsCount = 0;
+    if (!event.arg.empty()) {
+        lua_pushstring(g_LuaState, event.arg.c_str());
+        argsCount = 1;
+    }
 
-    connection.on("SendMessageToServer", [](const std::vector<signalr::value>& m)
+    if (lua_pcall(g_LuaState, argsCount, 0, 0) != 0) {
+        const char* err = lua_tostring(g_LuaState, -1);
+        lua_pop(g_LuaState, 1);
+
+        std::ofstream logfile("websocketLogging.txt", std::ios::app);
+        if (logfile.is_open()) {
+            logfile << "[LUA ERROR] In event " << event.name << ": " << err << std::endl;
+        }
+    }
+
+    lua_pop(g_LuaState, 1);
+}
+
+static void handleDisconnected(std::exception_ptr ex)
+{
+    if (connectionStatus == ConnectionStatus::DISCONNECTED)
+    {
+        return;
+    }
+
+    if (ex)
+    {
+        SetStatus(ConnectionStatus::_ERROR);
+        PushEvent("OnError", "Disconnected due to an error");
+
+        std::ofstream logfile("websocketLogging.txt", std::ios::app);
+        if (logfile.is_open()) {
+            logfile << "[ERROR] Disconnected due to an error." << std::endl;
+        }
+    }
+    else
+    {
+        SetStatus(ConnectionStatus::DISCONNECTED);
+        PushEvent("OnDisconnect");
+    }
+}
+
+static void ConnectionThreadFunc(std::string urlStr, std::string tokenStr)
+{
+    std::shared_ptr<signalr::hub_connection> threadConnection = nullptr;
+
+    try {
+        SetStatus(ConnectionStatus::CONNECTING);
+
+        auto newConnection = signalr::hub_connection_builder::create(urlStr)
+            .with_logging(std::make_shared<logger>(), signalr::trace_level::verbose)
+            .build();
+
+        if (!tokenStr.empty())
         {
-            queue.push(m[0].as_string());
-        });
+            signalr::signalr_client_config config;
+            config.get_http_headers().emplace("Authorization", tokenStr);
+            config.set_proxy({ web::web_proxy::use_auto_discovery });
+            newConnection.set_client_config(config);
+        }
 
-    start_task.get_future().get();
-    return;
-}
+        newConnection.set_disconnected(handleDisconnected);
 
-static int DisconnectWS(lua_State* L)
-{
-    std::promise<void> stop_task;
-    connection.stop([&stop_task](std::exception_ptr exception) {
-        stop_task.set_value();
-        });
-
-    stop_task.get_future().get();
-    return 0;
-}
-
-static int GetMessageWS(lua_State* L)
-{
-    if (queue.empty()) {
-        lua_pushstring(L, "");
-        return 1;
-    }
-
-    auto out = queue.front();
-    queue.pop();
-    lua_pushstring(L, out.c_str());
-    return 1;
-
-}
-
-static int SendMessageWS(lua_State* L)
-{
-    int numArgs = lua_gettop(L);
-
-    if (numArgs == 2) {
-        if (lua_isstring(L, 1)) {
-
-            if (!lua_istable(L, 2)) {
-                return luaL_error(L, "ConnectWS: Wait array string as 2 arg");
-            }
-
-            int n = lua_objlen(L, 2);
-            std::vector<std::string> stringVector;
-
-            for (int i = 1; i <= n; ++i) {
-                // Получаем элемент массива по индексу
-                lua_rawgeti(L, 2, i);
-
-                // Проверяем, является ли элемент строкой
-                if (!lua_isstring(L, -1)) {
-                    return luaL_error(L, "ConnectWS: Ожидалась строка в массиве");
+        newConnection.on("PendingMessage", [](const std::vector<signalr::value>& m)
+            {
+                if (!m.empty() && m[0].is_string()) {
+                    std::lock_guard<std::mutex> lock(messageQueueMutex);
+                    messageQueue.push(m[0].as_string());
                 }
+            });
 
-                // Получаем строку и добавляем её в вектор
-                const char* str = lua_tostring(L, -1);
-                stringVector.push_back(str);
+        std::atomic<bool> connection_started{ false };
+        std::atomic<bool> connection_failed{ false };
 
-                // Удаляем элемент из стека
-                lua_pop(L, 1);
+        newConnection.start([&connection_started, &connection_failed](std::exception_ptr exception) {
+            if (exception) {
+                connection_failed = true;
             }
-            const char* strArg = luaL_checkstring(L, 1);
-
-            std::promise<void> send_task;
-            std::vector<signalr::value> args;
-            for (const std::string& str : stringVector) {
-                args.push_back(signalr::value(str));
+            else {
+                connection_started = true;
             }
-            connection.invoke(strArg, args, [&send_task](const signalr::value& value, std::exception_ptr exception) {
-                send_task.set_value();
-                });
+            });
 
-            send_task.get_future().get();
-            lua_settop(L, 0);
-            return 0;
-
+        auto start_time = std::chrono::steady_clock::now();
+        while (!connection_started.load() && !connection_failed.load()) {
+            if (std::chrono::steady_clock::now() - start_time > std::chrono::seconds(15)) {
+                throw std::runtime_error("Connection timeout");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        else {
-            return luaL_error(L, "ConnectWS: Argument must be a string");
+
+        if (connection_failed.load()) {
+            throw std::runtime_error("failed during start");
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(connectionMutex);
+            threadConnection = std::make_shared<signalr::hub_connection>(std::move(newConnection));
+            connection = threadConnection;
+        }
+
+        SetStatus(ConnectionStatus::CONNECTED);
+        PushEvent("OnConnect");
+
+        while (!stopThread.load() && connectionStatus == ConnectionStatus::CONNECTED) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
     }
-    else {
-        return luaL_error(L, "ConnectWS: Missing argument");
+    catch (const std::exception& e) {
+        SetStatus(ConnectionStatus::_ERROR);
+        PushEvent("OnError", "Exception due to " + std::string(e.what()));
+        std::ofstream logfile("websocketLogging.txt", std::ios::app);
+        if (logfile.is_open()) logfile << "[ERROR] " << e.what() << std::endl;
     }
+    catch (...) {
+        SetStatus(ConnectionStatus::_ERROR);
+        PushEvent("OnError", "Unknown exception");
+    }
+
+    if (threadConnection) {
+        threadConnection->stop([](std::exception_ptr) {});
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(connectionMutex);
+        connection = nullptr;
+        threadConnection = nullptr;
+    }
+
+    SetStatus(ConnectionStatus::DISCONNECTED);
 }
-
 
 
 static int ConnectWS(lua_State* L)
@@ -151,63 +243,238 @@ static int ConnectWS(lua_State* L)
     int numArgs = lua_gettop(L);
 
     if (numArgs > 0 && numArgs < 3) {
-
-        if (lua_isstring(L, 1))
-        {
+        if (lua_isstring(L, 1)) {
             url = lua_tostring(L, 1);
-            std::promise<void> start_task;
+            token = (numArgs == 2 && lua_isstring(L, 2)) ? lua_tostring(L, 2) : "";
 
-            connection = signalr::hub_connection_builder::create(url)
-                .with_logging(std::make_shared<logger>(), signalr::trace_level::error)
-                .build();
-
-            if (numArgs == 2)
-            {
-                if (lua_isstring(L, 2) == false)
-                    return luaL_error(L, "ConnectWS: token must be string");
-
-                token = lua_tostring(L, 2);
-                signalr::signalr_client_config config;
-                config.get_http_headers().emplace("Authorization", token);
-                config.set_proxy({ web::web_proxy::use_auto_discovery });
-                connection.set_client_config(config);
+            if (connectionStatus == ConnectionStatus::CONNECTING ||
+                connectionStatus == ConnectionStatus::CONNECTED) {
+                lua_pushboolean(L, false);
+                lua_pushstring(L, "Already connecting or connected");
+                return 2;
             }
 
-            //connection.set_disconnected(handleDisconnected);
+            if (connectionThread != nullptr) {
+                if (connectionThread->joinable()) {
+                    connectionThread->join();
+                }
+                delete connectionThread;
+                connectionThread = nullptr;
+            }
 
-            connection.on("PendingMessage", [](const std::vector<signalr::value>& m)
-            {
-                    queue.push(m[0].as_string());
-            });
+            stopThread = false;
 
-            connection.start([&start_task](std::exception_ptr exception) {
-                start_task.set_value();
-                });
+            try {
+                connectionThread = new std::thread(ConnectionThreadFunc, url, token);
+            }
+            catch (const std::exception& e) {
+                lua_pushboolean(L, false);
+                lua_pushstring(L, e.what());
+                return 2;
+            }
 
-            start_task.get_future().get();
-            isConnectionSetup = true;
+            lua_pushboolean(L, true);
+            return 1;
         }
         else {
             return luaL_error(L, "ConnectWS: URL must be a string");
         }
     }
     else {
-        return luaL_error(L, "ConnectWS: One or Two arguments excepted (url, token)");
+        return luaL_error(L, "ConnectWS: One or Two arguments expected (url, token)");
+    }
+}
+
+static int GetMessageWS(lua_State* L)
+{
+    std::lock_guard<std::mutex> lock(messageQueueMutex);
+    if (messageQueue.empty()) {
+        lua_pushstring(L, "");
+    }
+    else {
+        std::string out = messageQueue.front();
+        messageQueue.pop();
+        lua_pushstring(L, out.c_str());
+    }
+    return 1;
+}
+
+static int GetQueueSizeWS(lua_State* L)
+{
+    std::lock_guard<std::mutex> lock(messageQueueMutex);
+    lua_pushinteger(L, (int)messageQueue.size());
+    return 1;
+}
+
+static int GetStatusWS(lua_State* L)
+{
+    lua_pushstring(L, GetStatusString(connectionStatus));
+    return 1;
+}
+
+static int SendMessageWS(lua_State* L)
+{
+    int numArgs = lua_gettop(L);
+
+    if (numArgs != 2) {
+        return luaL_error(L, "Usage: SendMessage(methodName, argsTable)");
     }
 
+    if (!lua_isstring(L, 1) || !lua_istable(L, 2)) {
+        return luaL_error(L, "Arguments must be (string, table)");
+    }
+
+    if (!IsConnected()) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Not connected");
+        return 2;
+    }
+
+    const char* methodName = lua_tostring(L, 1);
+    int arraySize = lua_objlen(L, 2);
+
+    std::vector<signalr::value> args;
+    for (int i = 1; i <= arraySize; ++i) {
+        lua_rawgeti(L, 2, i);
+        if (lua_isstring(L, -1)) {
+            args.push_back(lua_tostring(L, -1));
+        }
+        else if (lua_isnumber(L, -1)) {
+            args.push_back(lua_tonumber(L, -1));
+        }
+        else if (lua_isboolean(L, -1)) {
+            args.push_back(lua_toboolean(L, -1) != 0);
+        }
+        else {
+            lua_pop(L, 1);
+            lua_pushboolean(L, false);
+            lua_pushstring(L, "Unsupported argument type in table");
+            return 2;
+        }
+        lua_pop(L, 1);
+    }
+
+    try {
+        std::lock_guard<std::mutex> lock(connectionMutex);
+            
+        if (!connection || connectionStatus != ConnectionStatus::CONNECTED) {
+            lua_pushboolean(L, false);
+            lua_pushstring(L, "Connection not ready");
+            return 2;
+        }
+
+        connection->invoke(methodName, args, [](const signalr::value&, std::exception_ptr e) {
+            if (e) {
+                try {
+                    std::rethrow_exception(e);
+                }
+                catch (const std::exception& ex) {
+                    std::ofstream logfile("websocketLogging.txt", std::ios::app);
+                    if (logfile.is_open()) {
+                        logfile << "[ERROR] Send failed: " << ex.what() << std::endl;
+                    }
+                }
+            }
+            });
+
+        lua_pushboolean(L, true);
+        return 1;
+    }
+    catch (const std::exception& e) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, e.what());
+        return 2;
+    }
+    catch (...) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Unknown error while sending");
+        return 2;
+    }
+}
+
+static int DisconnectWS(lua_State* L)
+{
+    if (connectionStatus == ConnectionStatus::DISCONNECTED) {
+        lua_pushboolean(L, true);
+        return 1;
+    }
+
+    stopThread = true;
+
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int ProcessEventsWS(lua_State* L)
+{
+    std::queue<LuaEvent> eventsToProcess;
+
+    {
+        std::lock_guard<std::mutex> lock(eventQueueMutex);
+        eventsToProcess.swap(eventQueue);
+    }
+
+    int processed = 0;
+    while (!eventsToProcess.empty()) {
+        LuaEvent event = eventsToProcess.front();
+        eventsToProcess.pop();
+
+        CallLuaEvent(event);
+        processed++;
+    }
+
+    lua_pushinteger(L, processed);
+    return 1;
+}
+
+static struct luaL_reg ls_lib[] = {
+    { "Connect", ConnectWS },
+    { "GetMessage", GetMessageWS },
+    { "GetQueueSize", GetQueueSizeWS },
+    { "GetStatus", GetStatusWS },
+    { "SendMessage", SendMessageWS },
+    { "Disconnect", DisconnectWS },
+    { "ProcessEvents", ProcessEventsWS },
+    { NULL, NULL }
+};
+
+extern "C" LUALIB_API int luaopen_WebS(lua_State* L) {
+    g_LuaState = L;
+    luaL_openlib(L, "WebS", ls_lib, 0);
     return 0;
 }
 
-//Регистрация реализованных в dll функций, что бы те стали доступны из lua.
-static struct luaL_reg ls_lib[] = {
-  { "Connect", ConnectWS },
-  { "SendMessage", SendMessageWS },
-  { "GetMessage", GetMessageWS },
-  { "Disconnect", DisconnectWS },
-  { NULL, NULL }
-};
-//Эту функцию lua будет искать при подключении dll, её название заканчиваться названием dll, luaopen_ИМЯВАШЕЙDLL
-extern "C" LUALIB_API int luaopen_WebS(lua_State * L) {
-    luaL_openlib(L, "WebS", ls_lib, 0);
-    return 0;
+BOOL APIENTRY DllMain(HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
+{
+    switch (ul_reason_for_call)
+    {
+    case DLL_PROCESS_ATTACH:
+        break;
+
+    case DLL_PROCESS_DETACH:
+        if (connectionStatus != ConnectionStatus::DISCONNECTED) {
+            try {
+                std::lock_guard<std::mutex> lock(connectionMutex);
+                if (connection) {
+                    connection->stop([](std::exception_ptr) {});
+                }
+            }
+            catch (...) {
+            }
+        }
+
+        if (connectionThread != nullptr) {
+            if (connectionThread->joinable()) {
+                connectionThread->join();
+            }
+            delete connectionThread;
+            connectionThread = nullptr;
+        }
+        break;
+
+    case DLL_THREAD_ATTACH:
+    case DLL_THREAD_DETACH:
+        break;
+    }
+    return TRUE;
 }
