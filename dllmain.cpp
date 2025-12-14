@@ -296,8 +296,28 @@ static int ConnectWS(lua_State* L)
 
 	if (numArgs > 0 && numArgs < 3) {
 		if (lua_isstring(L, 1)) {
-			url = lua_tostring(L, 1);
+			std::string tempUrl = lua_tostring(L, 1);
 			token = (numArgs == 2 && lua_isstring(L, 2)) ? lua_tostring(L, 2) : "";
+
+			size_t schemePos = tempUrl.find("://");
+
+			if (schemePos == std::string::npos) {
+				tempUrl = "https://" + tempUrl;
+			}
+			else {
+				std::string scheme = tempUrl.substr(0, schemePos);
+				std::transform(scheme.begin(), scheme.end(), scheme.begin(), ::tolower);
+
+				if (scheme != "http" && scheme != "https") {
+					lua_pushboolean(L, false);
+					std::string err = "Invalid URL scheme: '" + scheme + "'. Only 'http' and 'https' are supported.";
+					lua_pushstring(L, err.c_str());
+					g_Logger->logError("ConnectWS Error: " + err);
+					return 2;
+				}
+			}
+
+			url = tempUrl;
 
 			if (connectionStatus == ConnectionStatus::CONNECTING) {
 				lua_pushboolean(L, false);
