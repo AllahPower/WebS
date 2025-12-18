@@ -87,6 +87,13 @@ private:
 	}
 };
 
+struct AsyncResult {
+	int callbackRef;
+	signalr::value result;
+	std::string error;
+	bool success;
+};	
+
 struct LuaEvent {
 	std::string name;
 	std::string arg;
@@ -98,6 +105,9 @@ enum class ConnectionStatus {
 	CONNECTED = 2,
 	DISCONNECTING = 3
 };
+
+std::queue<AsyncResult> asyncResultsQueue;
+std::mutex asyncResultsMutex;
 
 std::queue<std::string> messageQueue;
 std::mutex messageQueueMutex;
@@ -369,6 +379,50 @@ static int ConnectWS(lua_State* L)
 	}
 }
 
+static void PushSignalRValueToLua(lua_State* L, const signalr::value& val) {
+	switch (val.type()) {
+	case signalr::value_type::string:
+		lua_pushstring(L, val.as_string().c_str());
+		break;
+	case signalr::value_type::float64:
+		lua_pushnumber(L, val.as_double());
+		break;
+	case signalr::value_type::boolean:
+		lua_pushboolean(L, val.as_bool());
+		break;
+	case signalr::value_type::null:
+		lua_pushnil(L);
+		break;
+	case signalr::value_type::array: {
+		const auto& arr = val.as_array();
+		lua_newtable(L);
+		for (size_t i = 0; i < arr.size(); ++i) {
+			PushSignalRValueToLua(L, arr[i]);
+			lua_rawseti(L, -2, i + 1);
+		}
+		break;
+	}
+	case signalr::value_type::map: {
+		const auto& map = val.as_map();
+		lua_newtable(L);
+		for (const auto& pair : map) {
+			lua_pushstring(L, pair.first.c_str());
+			PushSignalRValueToLua(L, pair.second);
+			lua_settable(L, -3);
+		}
+		break;
+	}
+	case signalr::value_type::binary: {
+		const auto& bin = val.as_binary();
+		lua_pushlstring(L, (const char*)bin.data(), bin.size());
+		break;
+	}
+	default:
+		lua_pushnil(L);
+		break;
+	}
+}
+
 static int GetMessageWS(lua_State* L)
 {
 	std::lock_guard<std::mutex> lock(messageQueueMutex);
@@ -474,7 +528,7 @@ static int SendMessageWS(lua_State* L)
 
 		connection->invoke(methodName, args, [](const signalr::value&, std::exception_ptr e) {
 			if (e) {
-				g_Logger->logError("SendMessage invoke callback reported failure.");
+				g_Logger->logError("SendMessageWS invoke callback reported failure.");
 			}
 			});
 
@@ -489,6 +543,81 @@ static int SendMessageWS(lua_State* L)
 	catch (...) {
 		lua_pushboolean(L, false);
 		lua_pushstring(L, "Unknown error while sending");
+		return 2;
+	}
+}
+
+static int SendMessageAsyncWS(lua_State* L)
+{
+	int numArgs = lua_gettop(L);
+	if (numArgs < 3) 
+		return luaL_error(L, "Usage: SendMessageAsync(methodName, argsTable, callback)");
+	if (!lua_isstring(L, 1) 
+		|| !lua_istable(L, 2) 
+		|| !lua_isfunction(L, 3)) {
+		return luaL_error(L, "Arguments: (string, table, function)");
+	}
+
+	if (!IsConnected()) {
+		lua_pushboolean(L, false);
+		lua_pushstring(L, "Not connected");
+		return 2;
+	}
+
+	const char* methodName = lua_tostring(L, 1);
+
+	lua_pushvalue(L, 3);
+	int callbackRef = luaL_ref(L, LUA_REGISTRYINDEX);
+
+	int arraySize = lua_objlen(L, 2);
+	std::vector<signalr::value> args;
+	for (int i = 1; i <= arraySize; ++i) {
+		lua_rawgeti(L, 2, i);
+		if (lua_isstring(L, -1)) 
+			args.push_back(lua_tostring(L, -1));
+		else if (lua_isnumber(L, -1)) 
+			args.push_back(lua_tonumber(L, -1));
+		else if (lua_isboolean(L, -1)) 
+			args.push_back(lua_toboolean(L, -1) != 0);
+		else {
+			luaL_unref(L, LUA_REGISTRYINDEX, callbackRef);
+			lua_pop(L, 1);
+			lua_pushboolean(L, false);
+			lua_pushstring(L, "Unsupported arg"); return 2;
+		}
+		lua_pop(L, 1);
+	}
+
+	try {
+		std::lock_guard<std::mutex> lock(connectionMutex);
+		if (!connection || connectionStatus != ConnectionStatus::CONNECTED) {
+			luaL_unref(L, LUA_REGISTRYINDEX, callbackRef);
+			lua_pushboolean(L, false);
+			lua_pushstring(L, "Connection lost");
+			return 2;
+		}
+
+		connection->invoke(methodName, args, [callbackRef](const signalr::value& result, std::exception_ptr e) {
+			AsyncResult res;
+			res.callbackRef = callbackRef;
+			res.success = !e;
+			if (e) {
+				g_Logger->logError("SendMessageAsyncWS invoke callback reported failure.");
+			}
+			else {
+				res.result = result;
+			}
+			std::lock_guard<std::mutex> lock(asyncResultsMutex);
+			asyncResultsQueue.push(res);
+			});
+
+		lua_pushboolean(L, true);
+		return 1;
+	}
+	catch (const std::exception& e) {
+		luaL_unref(L, LUA_REGISTRYINDEX, callbackRef);
+		lua_pushboolean(L, false);
+		lua_pushstring(L, e.what());
 		return 2;
 	}
 }
@@ -530,6 +659,48 @@ static int ProcessEventsWS(lua_State* L)
 		processed++;
 	}
 
+	std::queue<AsyncResult> resultsToProcess;
+	{
+		std::lock_guard<std::mutex> lock(asyncResultsMutex);
+		if (!asyncResultsQueue.empty()) {
+			resultsToProcess.swap(asyncResultsQueue);
+		}
+	}
+
+	while (!resultsToProcess.empty()) {
+		AsyncResult res = resultsToProcess.front();
+		resultsToProcess.pop();
+
+		if (res.callbackRef != LUA_NOREF) {
+			lua_rawgeti(L, LUA_REGISTRYINDEX, res.callbackRef);
+
+			if (lua_isfunction(L, -1)) {
+				lua_pushboolean(L, res.success);
+
+				if (res.success) {
+					PushSignalRValueToLua(L, res.result);
+				}
+				else {
+					lua_pushstring(L, res.error.c_str());
+				}
+
+				if (lua_pcall(L, 2, 0, 0) != 0) {
+					const char* err = lua_tostring(L, -1);
+					if (g_Logger) g_Logger->logError("Error in async callback: " + std::string(err));
+					lua_pop(L, 1);
+				}
+			}
+			else {
+				lua_pop(L, 1);
+				if (g_Logger) g_Logger->logError("Async callback ref is not a function!");
+			}
+
+			luaL_unref(L, LUA_REGISTRYINDEX, res.callbackRef);
+
+			processed++;
+		}
+	}
+
 	lua_pushinteger(L, processed);
 	return 1;
 }
@@ -541,6 +712,7 @@ static struct luaL_reg ls_lib[] = {
 	{ "GetStatus", GetStatusWS },
 	{ "GetConnectionId", GetConnectionIdWS },
 	{ "SendMessage", SendMessageWS },
+	{ "SendMessageAsync", SendMessageAsyncWS },
 	{ "Disconnect", DisconnectWS },
 	{ "ProcessEvents", ProcessEventsWS },
 	{ NULL, NULL }
