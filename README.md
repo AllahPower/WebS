@@ -12,10 +12,11 @@ The library exports the following methods under the `WebS` namespace:
 | :--- | :--- |
 | `WebS.Connect(url, [token])` | Initiates a connection to the SignalR hub. `url` is required; `token` (JWT) is optional. Returns `true` on success (start of process). |
 | `WebS.Disconnect()` | Disconnects from the hub safely. |
-| `WebS.SendMessage(method, argsTable)` | Invokes a method on the SignalR hub. `method` is the hub function name (string), `argsTable` is a table of arguments (strings, numbers, booleans). |
+| `WebS.SendMessage(method, argsTable)` | **Fire-and-Forget.** Invokes a method on the hub without waiting for a result. |
+| `WebS.SendMessageAsync(method, argsTable, callback)` | **New!** Invokes a method and waits for a result asynchronously. `callback` is a function `func(success, result)` called when the server responds. |
 | `WebS.GetMessage()` | Retrieves the next message from the incoming queue. Returns an empty string if the queue is empty. |
-| `WebS.GetConnectionId()` | **New!** Returns the unique Connection ID string assigned by the SignalR hub. Returns an empty string if not connected. |
-| `WebS.ProcessEvents()` | **Must be called in a loop.** Processes internal events (`OnConnect`, `OnError`, `OnDisconnect`) and triggers Lua callbacks. |
+| `WebS.GetConnectionId()` | Returns the unique Connection ID string assigned by the SignalR hub. Returns an empty string if not connected. |
+| `WebS.ProcessEvents()` | **Must be called in a loop.** Processes internal events (`OnConnect`, `OnError`) and **executes async callbacks**. |
 | `WebS.GetStatus()` | Returns the current connection status: `"disconnected"`, `"connecting"`, `"connected"`, `"disconnecting"`. |
 | `WebS.GetQueueSize()` | Returns the number of unread messages in the queue. |
 
@@ -85,13 +86,10 @@ end
 2.  [x] **Event System:** Implement `OnConnect`, `OnError` callbacks with arguments.
 3.  [x] **Crash Fixes:** Resolve Access Violations by removing unsafe `std::rethrow_exception` usage.
 4.  [x] **General Logging:** Implement a robust logging system with log levels (Info/Debug/Error) and clean formatting.
-5.  [ ] **Custom Lua Events:** Allow registering dynamic event handlers from Lua (e.g., `WebS.On("MyEvent", callback)`) instead of hardcoded callbacks.
-6.  [ ] **OOP Refactoring:** Encapsulate global state into a proper Singleton class or Object instances.
-7.  [ ] **Reconnect Logic:** Add automatic reconnection strategies with exponential backoff.
-8.  [ ] **Advanced JSON Serialization:**
-    *   **Full Object Serialization:** Implement automatic serialization of nested Lua tables into JSON strings.
-    *   **Type-Specific Handling:** Ensure correct formatting for non-string types (numbers, booleans, nulls) without quotes.
-    *   **Complex Structures:** Support for arrays, dictionaries, and mixed collections in `SendMessage`.
+5.  [x] **Async Requests:** Added `SendMessageAsync` to handle server responses via Lua callbacks.
+6.  [ ] **Custom Lua Events:** Allow registering dynamic event handlers from Lua (e.g., `WebS.On("MyEvent", callback)`) instead of hardcoded callbacks.
+7.  [ ] **OOP Refactoring:** Encapsulate global state into a proper Singleton class or Object instances.
+8.  [ ] **Reconnect Logic:** Add automatic reconnection strategies with exponential backoff.
 
 ---
 
