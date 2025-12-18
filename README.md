@@ -85,9 +85,13 @@ end
 2.  [x] **Event System:** Implement `OnConnect`, `OnError` callbacks with arguments.
 3.  [x] **Crash Fixes:** Resolve Access Violations by removing unsafe `std::rethrow_exception` usage.
 4.  [x] **General Logging:** Implement a robust logging system with log levels (Info/Debug/Error) and clean formatting.
-5.  [ ] **OOP Refactoring:** encapsulate global state into a proper Singleton class or Object instances.
-6.  [ ] **Reconnect Logic:** Add automatic reconnection strategies with exponential backoff.
-7.  [ ] **JSON Support:** Native JSON parsing support for complex objects in `SendMessage`.
+5.  [ ] **Custom Lua Events:** Allow registering dynamic event handlers from Lua (e.g., `WebS.On("MyEvent", callback)`) instead of hardcoded callbacks.
+6.  [ ] **OOP Refactoring:** Encapsulate global state into a proper Singleton class or Object instances.
+7.  [ ] **Reconnect Logic:** Add automatic reconnection strategies with exponential backoff.
+8.  [ ] **Advanced JSON Serialization:**
+    *   **Full Object Serialization:** Implement automatic serialization of nested Lua tables into JSON strings.
+    *   **Type-Specific Handling:** Ensure correct formatting for non-string types (numbers, booleans, nulls) without quotes.
+    *   **Complex Structures:** Support for arrays, dictionaries, and mixed collections in `SendMessage`.
 
 ---
 
