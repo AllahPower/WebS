@@ -2,6 +2,7 @@
 #include "WebSClient.h"
 #include "LuaBindings.h"
 #include "Logger.h"
+#include "Version.h"
 #include <delayimp.h>
 
 extern "C" {
@@ -102,7 +103,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         DisableThreadLibraryCalls(hModule);
 
         WebS::Logger::instance().clear();
-        WebS::Logger::instance().info("=== New session started ===");
+        WebS::Logger::instance().info(std::string("=== WebS v") + WebS::Version + " session started ===");
 
         if (!LoadDependencies(hModule)) {
             std::ofstream logfile("websocketLogging.txt", std::ios::app);

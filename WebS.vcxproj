@@ -167,6 +167,7 @@
     <ClInclude Include="EventManager.h" />
     <ClInclude Include="WebSClient.h" />
     <ClInclude Include="LuaBindings.h" />
+    <ClInclude Include="Version.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
@@ -183,6 +184,9 @@
   </ItemGroup>
   <ItemGroup>
     <Library Include="..\..\lua\Release\lua51.lib" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="WebS.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

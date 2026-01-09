@@ -93,6 +93,16 @@ WebS.SetLogLevel("verbose")
 WebS.SetLogLevel("error")
 ```
 
+### Info
+
+| Method | Description |
+| :--- | :--- |
+| `WebS.GetVersion()` | Returns library version string (e.g. `"2.0.2"`). |
+
+```lua
+print("WebS version: " .. WebS.GetVersion())
+```
+
 ---
 
 ## Lua Example
@@ -198,6 +208,8 @@ moonloader/lib/
 - [x] **Custom Lua Events:** Dynamic event handlers via `WebS.On("Event", callback)`
 - [x] **OOP Refactoring:** Singleton architecture with separated concerns
 - [x] **Reconnect Logic:** Auto-reconnection with exponential backoff
+- [x] **Version System:** PE resource linking with `GetVersion()` API
+- [x] **Session Logging:** Log file cleared on each game session start
 
 ---
 

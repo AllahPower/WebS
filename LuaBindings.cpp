@@ -3,6 +3,7 @@
 #include "WebSClient.h"
 #include "Logger.h"
 #include "Types.h"
+#include "Version.h"
 
 extern "C" {
 #include "lauxlib.h"
@@ -281,6 +282,11 @@ namespace WebS {
 			return 1;
 		}
 
+		int GetVersion(lua_State* L) {
+			lua_pushstring(L, WebS::Version);
+			return 1;
+		}
+
 		static const struct luaL_Reg websFunctions[] = {
 			{ "Connect", Connect },
 			{ "Disconnect", Disconnect },
@@ -297,6 +303,7 @@ namespace WebS {
 			{ "GetReconnectAttempts", GetReconnectAttempts },
 			{ "SetLogLevel", SetLogLevel },
 			{ "GetLogLevel", GetLogLevel },
+			{ "GetVersion", GetVersion },
 			{ NULL, NULL }
 		};
 

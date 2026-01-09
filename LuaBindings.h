@@ -26,6 +26,8 @@ int GetReconnectAttempts(lua_State* L);
 int SetLogLevel(lua_State* L);
 int GetLogLevel(lua_State* L);
 
+int GetVersion(lua_State* L);
+
 void registerAll(lua_State* L);
 
 } // namespace LuaBindings
