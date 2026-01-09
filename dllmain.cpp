@@ -100,6 +100,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         }
 
         DisableThreadLibraryCalls(hModule);
+
+        WebS::Logger::instance().clear();
+        WebS::Logger::instance().info("=== New session started ===");
+
         if (!LoadDependencies(hModule)) {
             std::ofstream logfile("websocketLogging.txt", std::ios::app);
             if (logfile.is_open()) {

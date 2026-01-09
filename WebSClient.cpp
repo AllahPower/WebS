@@ -67,11 +67,15 @@ int WebSClient::calculateBackoffDelay(int attempt) {
 }
 
 bool WebSClient::connect(const std::string& url, const std::string& token) {
+    Logger::instance().debug("Connect called with URL: " + url);
+    Logger::instance().verbose("Token provided: " + std::string(token.empty() ? "no" : "yes (length: " + std::to_string(token.length()) + ")"));
+
     std::string tempUrl = url;
 
     size_t schemePos = tempUrl.find("://");
     if (schemePos == std::string::npos) {
         tempUrl = "https://" + tempUrl;
+        Logger::instance().verbose("No scheme provided, defaulting to https://");
     } else {
         std::string scheme = tempUrl.substr(0, schemePos);
         std::transform(scheme.begin(), scheme.end(), scheme.begin(), ::tolower);
@@ -79,9 +83,11 @@ bool WebSClient::connect(const std::string& url, const std::string& token) {
             Logger::instance().error("Invalid URL scheme: '" + scheme + "'");
             return false;
         }
+        Logger::instance().verbose("URL scheme: " + scheme);
     }
 
     ConnectionStatus currentStatus = status_.load();
+    Logger::instance().debug("Current status: " + std::string(ConnectionStatusToString(currentStatus)));
 
     if (currentStatus == ConnectionStatus::CONNECTED) {
         Logger::instance().error("Already connected");
@@ -94,10 +100,12 @@ bool WebSClient::connect(const std::string& url, const std::string& token) {
     }
 
     if (connectionThread_) {
+        Logger::instance().verbose("Waiting for previous connection thread to finish...");
         if (connectionThread_->joinable()) {
             connectionThread_->join();
         }
         connectionThread_.reset();
+        Logger::instance().verbose("Previous connection thread finished");
     }
 
     {
@@ -113,8 +121,10 @@ bool WebSClient::connect(const std::string& url, const std::string& token) {
     reconnectAttempts_ = 0;
     reconnecting_ = false;
 
+    Logger::instance().debug("Starting connection thread...");
     try {
         connectionThread_ = std::make_unique<std::thread>(&WebSClient::connectionThreadFunc, this, tempUrl, token);
+        Logger::instance().verbose("Connection thread started successfully");
     } catch (const std::exception& e) {
         Logger::instance().error("Failed to start connection thread: " + std::string(e.what()));
         return false;
@@ -124,43 +134,55 @@ bool WebSClient::connect(const std::string& url, const std::string& token) {
 }
 
 void WebSClient::registerServerMethod(const std::string& methodName) {
+    Logger::instance().debug("Registering server method: " + methodName);
     std::lock_guard<std::mutex> lock(serverMethodsMutex_);
     registeredServerMethods_.insert(methodName);
 }
 
 void WebSClient::unregisterServerMethod(const std::string& methodName) {
+    Logger::instance().debug("Unregistering server method: " + methodName);
     std::lock_guard<std::mutex> lock(serverMethodsMutex_);
     registeredServerMethods_.erase(methodName);
 }
 
 void WebSClient::registerAllServerMethods(signalr::hub_connection& conn) {
     std::lock_guard<std::mutex> lock(serverMethodsMutex_);
+    Logger::instance().verbose("Registering " + std::to_string(registeredServerMethods_.size()) + " server methods on connection");
     for (const auto& methodName : registeredServerMethods_) {
+        Logger::instance().verbose("  - Registering handler for: " + methodName);
         conn.on(methodName, [this, methodName](const std::vector<signalr::value>& args) {
             if (destroyed_.load()) return;
+            Logger::instance().verbose("Received server method call: " + methodName + " with " + std::to_string(args.size()) + " args");
             serverMessageQueue_.push({ methodName, args });
         });
     }
 }
 
 void WebSClient::connectionThreadFunc(std::string urlStr, std::string tokenStr) {
+    Logger::instance().debug("Connection thread started");
+    Logger::instance().verbose("Thread ID: " + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())));
+
     std::shared_ptr<signalr::hub_connection> threadConnection = nullptr;
 
     try {
         setStatus(ConnectionStatus::CONNECTING);
         Logger::instance().info("Connecting to: " + urlStr);
 
+        Logger::instance().verbose("Building hub connection...");
         auto newConnection = signalr::hub_connection_builder::create(urlStr)
             .with_logging(Logger::getShared(), signalr::trace_level::verbose)
             .build();
+        Logger::instance().verbose("Hub connection built");
 
         if (!tokenStr.empty()) {
+            Logger::instance().verbose("Configuring authorization header...");
             signalr::signalr_client_config config;
             config.get_http_headers().emplace("Authorization", tokenStr);
             config.set_proxy({ web::web_proxy::use_auto_discovery });
             newConnection.set_client_config(config);
         }
 
+        Logger::instance().verbose("Setting disconnected handler...");
         newConnection.set_disconnected([this](std::exception_ptr ex) {
             handleDisconnected(ex);
         });
@@ -170,6 +192,7 @@ void WebSClient::connectionThreadFunc(std::string urlStr, std::string tokenStr) 
         std::atomic<bool> connection_started{ false };
         std::atomic<bool> connection_failed{ false };
 
+        Logger::instance().debug("Starting connection...");
         newConnection.start([&connection_started, &connection_failed](std::exception_ptr exception) {
             if (exception) {
                 connection_failed = true;
@@ -178,6 +201,7 @@ void WebSClient::connectionThreadFunc(std::string urlStr, std::string tokenStr) 
             }
         });
 
+        Logger::instance().verbose("Waiting for connection to establish (timeout: 15s)...");
         auto start_time = std::chrono::steady_clock::now();
         while (!connection_started.load() && !connection_failed.load()) {
             if (std::chrono::steady_clock::now() - start_time > std::chrono::seconds(15)) {
@@ -189,6 +213,10 @@ void WebSClient::connectionThreadFunc(std::string urlStr, std::string tokenStr) 
         if (connection_failed.load()) {
             throw std::runtime_error("Failed to start connection");
         }
+
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+        Logger::instance().verbose("Connection established in " + std::to_string(elapsed) + "ms");
 
         {
             std::lock_guard<std::mutex> lock(connectionMutex_);
@@ -203,9 +231,13 @@ void WebSClient::connectionThreadFunc(std::string urlStr, std::string tokenStr) 
         Logger::instance().success("Connected successfully to hub.");
         eventManager_.emit("OnConnect");
 
+        Logger::instance().verbose("Entering connection maintenance loop...");
         while (!stopThread_.load() && status_.load() == ConnectionStatus::CONNECTED) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
+        Logger::instance().verbose("Exited connection maintenance loop (stopThread=" +
+            std::string(stopThread_.load() ? "true" : "false") + ", status=" +
+            ConnectionStatusToString(status_.load()) + ")");
     }
     catch (const std::exception& e) {
         setStatus(ConnectionStatus::DISCONNECTED);
@@ -298,7 +330,8 @@ void WebSClient::attemptReconnect() {
 
         if (config.maxAttempts > 0 && attempts > config.maxAttempts) {
             Logger::instance().error("Max reconnection attempts reached");
-            eventManager_.emit("OnError", { "Max reconnection attempts reached" });
+            setStatus(ConnectionStatus::DISCONNECTED);
+            eventManager_.emit("OnDisconnect");
             reconnecting_ = false;
             return;
         }
@@ -347,6 +380,7 @@ void WebSClient::attemptReconnect() {
             auto start_time = std::chrono::steady_clock::now();
             while (!started.load() && !failed.load()) {
                 if (stopThread_.load()) {
+                    setStatus(ConnectionStatus::DISCONNECTED);
                     reconnecting_ = false;
                     return;
                 }
@@ -383,11 +417,17 @@ void WebSClient::attemptReconnect() {
         }
     }
 
+    setStatus(ConnectionStatus::DISCONNECTED);
     reconnecting_ = false;
 }
 
 void WebSClient::disconnect() {
-    if (status_.load() == ConnectionStatus::DISCONNECTED) {
+    Logger::instance().debug("Disconnect called");
+    ConnectionStatus currentStatus = status_.load();
+    Logger::instance().verbose("Current status: " + std::string(ConnectionStatusToString(currentStatus)));
+
+    if (currentStatus == ConnectionStatus::DISCONNECTED) {
+        Logger::instance().verbose("Already disconnected, ignoring");
         return;
     }
 
@@ -410,19 +450,26 @@ std::string WebSClient::connectionId() const {
 }
 
 bool WebSClient::send(const std::string& method, const std::vector<signalr::value>& args) {
+    Logger::instance().debug("Send called: method=" + method + ", args=" + std::to_string(args.size()));
+
     if (status_.load() != ConnectionStatus::CONNECTED) {
+        Logger::instance().warning("Send failed: not connected");
         return false;
     }
 
     try {
         std::lock_guard<std::mutex> lock(connectionMutex_);
         if (!connection_) {
+            Logger::instance().warning("Send failed: connection is null");
             return false;
         }
 
-        connection_->invoke(method, args, [](const signalr::value&, std::exception_ptr e) {
+        Logger::instance().verbose("Invoking method: " + method);
+        connection_->invoke(method, args, [method](const signalr::value&, std::exception_ptr e) {
             if (e) {
-                Logger::instance().error("SendMessage invoke callback reported failure.");
+                Logger::instance().error("SendMessage invoke callback reported failure for method: " + method);
+            } else {
+                Logger::instance().verbose("SendMessage completed successfully for method: " + method);
             }
         });
         return true;
@@ -433,18 +480,24 @@ bool WebSClient::send(const std::string& method, const std::vector<signalr::valu
 }
 
 bool WebSClient::sendAsync(const std::string& method, const std::vector<signalr::value>& args, int callbackRef) {
+    Logger::instance().debug("SendAsync called: method=" + method + ", args=" + std::to_string(args.size()) + ", callbackRef=" + std::to_string(callbackRef));
+
     if (status_.load() != ConnectionStatus::CONNECTED) {
+        Logger::instance().warning("SendAsync failed: not connected");
         return false;
     }
 
     try {
         std::lock_guard<std::mutex> lock(connectionMutex_);
         if (!connection_) {
+            Logger::instance().warning("SendAsync failed: connection is null");
             return false;
         }
 
-        connection_->invoke(method, args, [this, callbackRef](const signalr::value& result, std::exception_ptr e) {
+        Logger::instance().verbose("Invoking async method: " + method);
+        connection_->invoke(method, args, [this, callbackRef, method](const signalr::value& result, std::exception_ptr e) {
             if (destroyed_.load()) {
+                Logger::instance().verbose("SendAsync callback ignored: destroyed");
                 return;
             }
             AsyncResult res;
@@ -452,8 +505,9 @@ bool WebSClient::sendAsync(const std::string& method, const std::vector<signalr:
             res.success = !e;
             if (e) {
                 res.error = "Invoke failed";
-                Logger::instance().error("SendMessageAsync invoke callback reported failure.");
+                Logger::instance().error("SendMessageAsync invoke callback reported failure for method: " + method);
             } else {
+                Logger::instance().verbose("SendMessageAsync completed successfully for method: " + method);
                 res.result = result;
             }
             asyncResultsQueue_.push(res);
@@ -560,20 +614,27 @@ int WebSClient::processEvents(lua_State* L) {
 }
 
 void WebSClient::shutdown() {
+    Logger::instance().debug("Shutdown initiated");
+
     destroyed_ = true;
     stopThread_ = true;
 
     if (status_.load() != ConnectionStatus::DISCONNECTED) {
+        Logger::instance().verbose("Stopping active connection...");
         try {
             std::lock_guard<std::mutex> lock(connectionMutex_);
             if (connection_) {
                 connection_->stop([](std::exception_ptr) {});
             }
-        } catch (...) {}
+        } catch (...) {
+            Logger::instance().warning("Exception during connection stop (ignored)");
+        }
     }
 
     if (connectionThread_ && connectionThread_->joinable()) {
+        Logger::instance().verbose("Waiting for connection thread to finish...");
         connectionThread_->join();
+        Logger::instance().verbose("Connection thread finished");
     }
     connectionThread_.reset();
 
@@ -583,14 +644,17 @@ void WebSClient::shutdown() {
     }
 
     if (luaState_) {
+        Logger::instance().verbose("Clearing event manager...");
         eventManager_.clear(luaState_);
     }
 
+    Logger::instance().verbose("Clearing message queues...");
     messageQueue_.clear();
     asyncResultsQueue_.clear();
     serverMessageQueue_.clear();
 
     setStatus(ConnectionStatus::DISCONNECTED);
+    Logger::instance().info("Shutdown complete");
 }
 
 static void pushSignalRValueToLuaImpl(lua_State* L, const signalr::value& val, int depth) {

@@ -69,6 +69,30 @@ WebS.SetReconnect({
 })
 ```
 
+### Logging
+
+| Method | Description |
+| :--- | :--- |
+| `WebS.SetLogLevel(level)` | Sets minimum log level. |
+| `WebS.GetLogLevel()` | Returns current log level. |
+
+**Log levels (from least to most verbose):**
+- `"none"` - Disable all logging
+- `"critical"` - Only critical errors
+- `"error"` - Errors and critical
+- `"warning"` - Warnings and above
+- `"info"` - General information (default)
+- `"debug"` - Debug information
+- `"verbose"` - All messages including SignalR internals
+
+```lua
+-- Enable verbose logging for debugging
+WebS.SetLogLevel("verbose")
+
+-- Reduce logging in production
+WebS.SetLogLevel("error")
+```
+
 ---
 
 ## Lua Example

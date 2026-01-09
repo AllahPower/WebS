@@ -260,6 +260,27 @@ namespace WebS {
 			return 1;
 		}
 
+		int SetLogLevel(lua_State* L) {
+			if (!lua_isstring(L, 1)) {
+				return luaL_error(L, "Usage: SetLogLevel(level) where level is 'none', 'critical', 'error', 'warning', 'info', 'debug', or 'verbose'");
+			}
+
+			const char* levelStr = lua_tostring(L, 1);
+			LogLevel level = StringToLogLevel(levelStr);
+			Logger::instance().setMinLevel(level);
+
+			Logger::instance().info("Log level set to: " + std::string(LogLevelToString(level)));
+
+			lua_pushboolean(L, true);
+			return 1;
+		}
+
+		int GetLogLevel(lua_State* L) {
+			LogLevel level = Logger::instance().minLevel();
+			lua_pushstring(L, LogLevelToString(level));
+			return 1;
+		}
+
 		static const struct luaL_Reg websFunctions[] = {
 			{ "Connect", Connect },
 			{ "Disconnect", Disconnect },
@@ -274,6 +295,8 @@ namespace WebS {
 			{ "Off", Off },
 			{ "SetReconnect", SetReconnect },
 			{ "GetReconnectAttempts", GetReconnectAttempts },
+			{ "SetLogLevel", SetLogLevel },
+			{ "GetLogLevel", GetLogLevel },
 			{ NULL, NULL }
 		};
 
