@@ -4,108 +4,193 @@
 
 ---
 
-## 🛠️ Lua API Methods
+## Architecture
 
-The library exports the following methods under the `WebS` namespace:
+The library is built with OOP principles using the following components:
 
-| Method | Description |
+| Component | Description |
 | :--- | :--- |
-| `WebS.Connect(url, [token])` | Initiates a connection to the SignalR hub. `url` is required; `token` (JWT) is optional. Returns `true` on success (start of process). |
-| `WebS.Disconnect()` | Disconnects from the hub safely. |
-| `WebS.SendMessage(method, argsTable)` | **Fire-and-Forget.** Invokes a method on the hub without waiting for a result. |
-| `WebS.SendMessageAsync(method, argsTable, callback)` | **New!** Invokes a method and waits for a result asynchronously. `callback` is a function `func(success, result)` called when the server responds. |
-| `WebS.GetMessage()` | Retrieves the next message from the incoming queue. Returns an empty string if the queue is empty. |
-| `WebS.GetConnectionId()` | Returns the unique Connection ID string assigned by the SignalR hub. Returns an empty string if not connected. |
-| `WebS.ProcessEvents()` | **Must be called in a loop.** Processes internal events (`OnConnect`, `OnError`) and **executes async callbacks**. |
-| `WebS.GetStatus()` | Returns the current connection status: `"disconnected"`, `"connecting"`, `"connected"`, `"disconnecting"`. |
-| `WebS.GetQueueSize()` | Returns the number of unread messages in the queue. |
-
-### Lua Callbacks
-Define these functions in your script to handle events:
-
-*   `WebS.OnConnect()` - Triggered when the connection is successfully established.
-*   `WebS.OnDisconnect()` - Triggered when the connection is closed.
-*   `WebS.OnError(message)` - Triggered on connection failure or errors, passing the error message string.
+| `WebSClient` | Singleton managing connection lifecycle, reconnection, and message queues |
+| `EventManager` | Dynamic event registration system with callback management |
+| `Logger` | Thread-safe file logger implementing `signalr::log_writer` |
+| `ThreadSafeQueue<T>` | Generic thread-safe queue for cross-thread communication |
 
 ---
 
-## 📝 Lua Example
+## Lua API Methods
 
-Below is a simple MoonLoader script demonstrating how to connect, handle events, and send messages.
+The library exports the following methods under the `WebS` namespace:
 
-```js
-require "WebS"
+### Connection
+
+| Method | Description |
+| :--- | :--- |
+| `WebS.Connect(url, [token])` | Initiates connection to SignalR hub. Returns `true` on success. |
+| `WebS.Disconnect()` | Disconnects from the hub safely. |
+| `WebS.GetStatus()` | Returns status: `"disconnected"`, `"connecting"`, `"connected"`, `"disconnecting"`, `"reconnecting"`. |
+| `WebS.GetConnectionId()` | Returns the Connection ID assigned by the hub. |
+
+### Messaging
+
+| Method | Description |
+| :--- | :--- |
+| `WebS.SendMessage(method, argsTable)` | Fire-and-Forget. Invokes a hub method without waiting. |
+| `WebS.SendMessageAsync(method, argsTable, callback)` | Invokes a method and calls `callback(success, result)` on response. |
+| `WebS.GetMessage()` | Retrieves next message from queue. Returns empty string if empty. |
+| `WebS.GetQueueSize()` | Returns number of unread messages. |
+| `WebS.ProcessEvents()` | **Must be called in a loop.** Processes events and callbacks. |
+
+### Events
+
+| Method | Description |
+| :--- | :--- |
+| `WebS.On(eventName, callback)` | Registers a callback for an event. Returns callback reference. |
+| `WebS.Off(eventName, callbackRef)` | Removes a previously registered callback. |
+
+**Built-in events:** `OnConnect`, `OnDisconnect`, `OnError`, `OnReconnecting`, `OnReconnected`
+
+**Server methods:** Any server-side method can be subscribed via `WebS.On("MethodName", callback)`.
+
+### Reconnection
+
+| Method | Description |
+| :--- | :--- |
+| `WebS.SetReconnect(config)` | Configures auto-reconnect behavior. |
+| `WebS.GetReconnectAttempts()` | Returns current reconnection attempt count. |
+
+**Config options:**
+```lua
+WebS.SetReconnect({
+    enabled = true,        -- Enable auto-reconnect
+    maxAttempts = 5,       -- Max attempts (0 = infinite)
+    initialDelay = 1000,   -- Initial delay in ms
+    maxDelay = 30000,      -- Max delay in ms
+    multiplier = 2.0       -- Exponential backoff multiplier
+})
+```
+
+---
+
+## Lua Example
+
+```lua
+require("WebS")
 
 local encoding = require 'encoding'
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
 
-WebS.OnConnect = function()
-    sampAddChatMessage("SignalR: Connected successfully!", 0x00FF00)
-end
-
-WebS.OnError = function(msg)
-    sampAddChatMessage("SignalR Error: " .. tostring(msg), 0xFF0000)
-end
-
-WebS.OnDisconnect = function()
-    sampAddChatMessage("SignalR: Disconnected.", 0xFFAA00)
-end
+local SERVER_URL = "https://localhost:7243/hub"
 
 function main()
-    if not isSampLoaded() then return end
+    if not isSampLoaded() or not isSampfuncsLoaded() then return end
     while not isSampAvailable() do wait(100) end
 
-    WebS.Connect("http://localhost:5000/chatHub", "MY_SECRET_TOKEN")
-
-    sampRegisterChatCommand("ws_send", function(text)
-        local _, myId = sampGetPlayerIdByCharHandle(PLAYER_PED)
-        
-        local payload_table = { myId, u8(text) }
-        WebS.SendMessage("SendMessage", payload_table)
+    -- Register event handlers
+    WebS.On("OnConnect", function()
+        sampAddChatMessage("[WebS] Connected!", 0x00FF00)
     end)
 
-    while true do
-        wait(0)
-        
-        WebS.ProcessEvents()
+    WebS.On("OnDisconnect", function()
+        sampAddChatMessage("[WebS] Disconnected.", 0xFFAA00)
+    end)
 
-        local msg = WebS.GetMessage()
-        if msg ~= "" then
-            sampAddChatMessage("Server: " .. u8:decode(msg), 0xFFFFFF)
+    WebS.On("OnError", function(msg)
+        sampAddChatMessage("[WebS] Error: " .. tostring(msg), 0xFF0000)
+    end)
+
+    WebS.On("OnReconnecting", function(attempt)
+        sampAddChatMessage("[WebS] Reconnecting... Attempt: " .. attempt, 0xFFFF00)
+    end)
+
+    WebS.On("OnReconnected", function()
+        sampAddChatMessage("[WebS] Reconnected!", 0x00FF00)
+    end)
+
+    -- Register server method handler
+    WebS.On("ReceiveMessage", function(msg)
+        sampAddChatMessage("[Server] " .. u8:decode(msg), 0x00DDDD)
+    end)
+
+    -- Configure reconnection
+    WebS.SetReconnect({
+        enabled = true,
+        maxAttempts = 5,
+        initialDelay = 1000,
+        maxDelay = 30000,
+        multiplier = 2.0
+    })
+
+    -- Register commands
+    sampRegisterChatCommand("ws_connect", function()
+        WebS.Connect(SERVER_URL)
+    end)
+
+    sampRegisterChatCommand("ws_send", function(text)
+        if WebS.GetStatus() ~= "connected" then
+            sampAddChatMessage("[WebS] Not connected!", 0xFF0000)
+            return
         end
+        WebS.SendMessage("SendMessage", { u8(text) })
+    end)
+
+    -- Main loop
+    while true do
+        wait(50)
+        WebS.ProcessEvents()
     end
 end
 ```
 
 ---
 
-## ✅ TODO / Roadmap
+## Installation
 
-1.  [x] **Async Architecture:** Move connection logic to a background thread to prevent game freezes.
-2.  [x] **Event System:** Implement `OnConnect`, `OnError` callbacks with arguments.
-3.  [x] **Crash Fixes:** Resolve Access Violations by removing unsafe `std::rethrow_exception` usage.
-4.  [x] **General Logging:** Implement a robust logging system with log levels (Info/Debug/Error) and clean formatting.
-5.  [x] **Async Requests:** Added `SendMessageAsync` to handle server responses via Lua callbacks.
-6.  [ ] **Custom Lua Events:** Allow registering dynamic event handlers from Lua (e.g., `WebS.On("MyEvent", callback)`) instead of hardcoded callbacks.
-7.  [ ] **OOP Refactoring:** Encapsulate global state into a proper Singleton class or Object instances.
-8.  [ ] **Reconnect Logic:** Add automatic reconnection strategies with exponential backoff.
+Place all DLL files in `moonloader/lib/`:
+
+```
+moonloader/lib/
+  WebS.dll
+  microsoft-signalr.dll
+  cpprest_2_10.dll
+  jsoncpp.dll
+  libcrypto-3.dll
+  libssl-3.dll
+  zlib1.dll
+  brotlicommon.dll
+  brotlidec.dll
+  brotlienc.dll
+```
 
 ---
 
-## ⚠️ Building
+## TODO / Roadmap
 
-*   **Platform:** Windows (x86, 32-bit only)
-*   **Compiler:** MSVC (Visual Studio 2019/2022/2026) with C++17 support.
+- [x] **Async Architecture:** Background thread for connection logic
+- [x] **Event System:** `OnConnect`, `OnError`, `OnDisconnect` callbacks
+- [x] **Crash Fixes:** Safe exception handling without `std::rethrow_exception`
+- [x] **General Logging:** Robust logging with levels (Info/Debug/Error)
+- [x] **Async Requests:** `SendMessageAsync` with Lua callbacks
+- [x] **Custom Lua Events:** Dynamic event handlers via `WebS.On("Event", callback)`
+- [x] **OOP Refactoring:** Singleton architecture with separated concerns
+- [x] **Reconnect Logic:** Auto-reconnection with exponential backoff
 
-### Dependencies:
-1.  **[SignalR-Client-Cpp](https://github.com/aspnet/SignalR-Client-Cpp):** The C++ client library for SignalR. You must build this dependency first.
-2.  **Lua 5.1 Sources:**
-    *   **Required Files:** `lua.h`, `lualib.h`, `lauxlib.h`.
-    *   **Reason:** The project needs these header files to link against the Lua API provided by MoonLoader.
-    *   **Get them here:** You can download the source code from the official [Lua 5.1.5 release page](https://www.lua.org/ftp/lua-5.1.5.tar.gz).
-    
-### Project Configuration:
-*   **Precompiled Headers (PCH):** The project uses `pch.h` for faster build times. Ensure this is configured correctly in Visual Studio.
-*   **Include Directories:** Add the paths to the SignalR client headers and the Lua 5.1 source files to your project's include directories.
-*   **Linker Directories:** Add the path to the compiled SignalR `.lib` file to your project's linker directories.
+---
+
+## Building
+
+* **Platform:** Windows (x86, 32-bit only)
+* **Compiler:** MSVC (Visual Studio 2019/2022) with C++17 support
+
+### Dependencies
+
+1. **[SignalR-Client-Cpp](https://github.com/aspnet/SignalR-Client-Cpp):** Build this dependency first.
+2. **Lua 5.1 Headers:** `lua.h`, `lualib.h`, `lauxlib.h` from [Lua 5.1.5](https://www.lua.org/ftp/lua-5.1.5.tar.gz)
+
+### Project Configuration
+
+* **Precompiled Headers:** Uses `pch.h`
+* **Runtime Library:** Static (`/MT`)
+* **Delay-Loaded DLLs:** All SignalR dependencies use delay-load for custom path resolution
+* **Include Directories:** SignalR headers, Lua 5.1 sources
+* **Linker Directories:** SignalR `.lib` files
